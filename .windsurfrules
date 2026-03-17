@@ -1,0 +1,631 @@
+# Windsurf Rules — Spring Boot / Groovy / Spock / Docker Compose
+# Place this file at the root of your repository as .windsurfrules
+
+---
+
+## Project Stack
+- Language: Java 21 (production), Groovy (tests only)
+- Framework: Spring Boot 3.x
+- Build: Maven (multi-module)
+- Testing: Spock Framework with Groovy specs
+- Coverage: JaCoCo (line ≥ 80%, branch ≥ 75%)
+- Containerisation: Docker + Docker Compose
+- Resilience: Resilience4j (circuit breaker, retry, rate limiter)
+- HTTP clients: Spring Cloud OpenFeign
+
+---
+
+## Development Workflow
+See the full 9-step workflow in the Scalability & Architecture Rules section below.
+`/story-intake` → `/architecture-review` → `/plan-story` — in that order, always.
+Never write code without a confirmed ADR. Never skip `/code-quality` before `/nfr-check`.
+
+---
+
+## Java Production Code Rules
+
+### Dependency Injection
+- ALWAYS use constructor injection. Never `@Autowired` on fields.
+- Declare injected fields as `private final`.
+
+```java
+// ✅ Correct
+@Service
+public class OrderService {
+    private final OrderRepository orderRepository;
+    private final NotificationService notificationService;
+
+    public OrderService(OrderRepository orderRepository,
+                        NotificationService notificationService) {
+        this.orderRepository = orderRepository;
+        this.notificationService = notificationService;
+    }
+}
+
+// ❌ Wrong — never do this
+@Autowired
+private OrderRepository orderRepository;
+```
+
+### Null Safety
+- Never return `null` from a service method. Use `Optional<T>` or throw a domain exception.
+- Annotate all parameters and return types with `@NonNull` / `@Nullable` where ambiguous.
+
+### Logging
+- Use `@Slf4j` (Lombok). Never `System.out.println`.
+- Log at `DEBUG` for method entry/exit in service layer.
+- Log at `WARN` for recoverable errors, `ERROR` only for unrecoverable failures.
+
+### Exception Handling
+- Define domain exceptions extending `RuntimeException` per module.
+- Use `@RestControllerAdvice` for a global handler — never catch-and-swallow in services.
+
+### Validation
+- Annotate request DTOs with Bean Validation (`@NotNull`, `@NotBlank`, `@Size`, etc.)
+- Add `@Validated` to the controller class.
+
+### FeignClient / External Calls
+- All FeignClient interfaces must have a `@CircuitBreaker` or `@Retry` annotation.
+- Always provide a fallback method for circuit breakers.
+
+### Transactions
+- `@Transactional` on service methods that write to the database.
+- Read-only queries: `@Transactional(readOnly = true)`.
+
+---
+
+## Groovy / Spock Test Rules
+
+### Test File Location
+- Unit specs: `src/test/groovy/[package]/[layer]/[ClassName]Spec.groovy`
+- Integration specs: `src/test/groovy/[package]/integration/[ClassName]IntegrationSpec.groovy`
+
+### Spec Structure
+- Every spec extends `spock.lang.Specification`.
+- Use `@Subject` to annotate the class under test.
+- Use Spock `Mock()` and `Stub()` — never Mockito inside Spock specs.
+- All interaction verifications go in `then:` blocks, not `setup:`.
+- End every interaction block with `0 * _` to assert no unexpected interactions.
+
+### Naming Convention
+- Method name describes behaviour: `"should [expected] when [condition]"`
+- Use `@Unroll` for data-driven tests with `where:` tables.
+
+### Coverage Requirements
+- Every new service class must have a corresponding `*Spec.groovy`.
+- Every new controller endpoint must have at least one `MockMvc`-based spec.
+- Every exception/failure branch must have a dedicated test block.
+- Minimum: line coverage ≥ 80%, branch coverage ≥ 75% (enforced by JaCoCo Maven plugin).
+
+### What NOT to do in Spock
+```groovy
+// ❌ Never use Mockito annotations in a Spock spec
+@Mock
+OrderRepository repository
+
+// ❌ Never use verify() from Mockito
+verify(service).doSomething()
+
+// ✅ Always use Spock interaction syntax
+1 * repository.findById(_) >> Optional.of(order)
+```
+
+---
+
+## JaCoCo Maven Plugin Config
+Ensure this is present in the parent `pom.xml`:
+
+```xml
+<plugin>
+    <groupId>org.jacoco</groupId>
+    <artifactId>jacoco-maven-plugin</artifactId>
+    <version>0.8.12</version>
+    <executions>
+        <execution>
+            <id>prepare-agent</id>
+            <goals><goal>prepare-agent</goal></goals>
+        </execution>
+        <execution>
+            <id>report</id>
+            <phase>verify</phase>
+            <goals><goal>report</goal></goals>
+        </execution>
+        <execution>
+            <id>check</id>
+            <phase>verify</phase>
+            <goals><goal>check</goal></goals>
+            <configuration>
+                <rules>
+                    <rule>
+                        <element>BUNDLE</element>
+                        <limits>
+                            <limit>
+                                <counter>LINE</counter>
+                                <value>COVEREDRATIO</value>
+                                <minimum>0.80</minimum>
+                            </limit>
+                            <limit>
+                                <counter>BRANCH</counter>
+                                <value>COVEREDRATIO</value>
+                                <minimum>0.75</minimum>
+                            </limit>
+                        </limits>
+                    </rule>
+                </rules>
+                <!-- Exclude generated code, config classes, DTOs -->
+                <excludes>
+                    <exclude>**/config/**</exclude>
+                    <exclude>**/*Application.class</exclude>
+                    <exclude>**/*Dto.class</exclude>
+                    <exclude>**/*Request.class</exclude>
+                    <exclude>**/*Response.class</exclude>
+                    <exclude>**/generated/**</exclude>
+                </excludes>
+            </configuration>
+        </execution>
+    </executions>
+</plugin>
+```
+
+---
+
+## Docker / Docker Compose Rules
+
+### Dockerfile
+- Base image: `eclipse-temurin:21-jre-alpine` (not JDK in production image)
+- Use Spring Boot layered JAR for faster rebuilds
+- Always set `EXPOSE` to match `server.port`
+- Never hardcode secrets — use environment variables
+
+### docker-compose.yml
+- Every service must have a `healthcheck` block
+- Use named volumes (not bind mounts) for persistent data
+- Environment variables go in `.env` file — never hardcoded in `docker-compose.yml`
+- Services that depend on DB or Kafka must have `depends_on` with `condition: service_healthy`
+
+### docker-compose.yml Health Check Template
+```yaml
+healthcheck:
+  test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/actuator/health"]
+  interval: 30s
+  timeout: 10s
+  retries: 3
+  start_period: 40s
+```
+
+---
+
+## Git Commit Convention
+Format: `type(STORY-ID): short description`
+
+Types: `feat`, `fix`, `test`, `refactor`, `chore`, `docs`
+
+Examples:
+- `feat(PROJ-123): add password reset endpoint`
+- `test(PROJ-123): add Spock specs for PasswordResetService`
+- `fix(PROJ-456): handle null token in auth filter`
+
+---
+
+## Clean Code Rules (enforced on every file Cascade writes or edits)
+
+### Method Design
+- Every method must do **exactly one thing**. If the name needs "and" or "or", split it.
+- Maximum method length: **20 lines** (blank lines and comments excluded).
+- Maximum method parameters: **3**. Beyond that, use a parameter object or builder.
+- Method names must describe intent: `calculateOrderTotal()` not `process()`.
+  Vague names (`handle`, `execute`, `doStuff`, `run`) are forbidden.
+
+### Guard Clauses over Nesting
+Replace nested if/else with early-return guard clauses. Happy path reads top-to-bottom.
+Maximum nesting depth: 2 levels.
+```java
+// ✅ Guard clauses
+public void fulfil(Order order) {
+    if (order == null) throw new IllegalArgumentException("Order must not be null");
+    if (!order.isConfirmed()) return;
+    if (order.isFulfilled()) return;
+    warehouse.dispatch(order);
+}
+```
+
+### Constants over Magic Values
+- Never use a raw number (except 0 and 1) or raw string literal in logic.
+- Extract to `private static final` constant or `enum`.
+
+### No Commented-Out Code
+Remove all commented-out production code blocks. Git is the version record.
+
+### Exception Handling
+- Never swallow an exception: `catch (Exception e) {}` is always wrong.
+- Always log at `ERROR` with the exception as the last argument, then rethrow.
+
+### Simplicity and Immutability
+- Use `record` for value objects and DTOs.
+- Use `Optional<T>` for nullable returns — never return `null` from a public method.
+- Prefer `final` fields and immutable collections (`List.of`, `Map.of`).
+
+---
+
+## Observability Rules (enforced on every @Service method Cascade writes or edits)
+
+### Structured Logging — key=value Format
+Every public service method must have:
+1. `log.info` at **entry** with primary domain identifier(s)
+2. `log.info` at **exit** with outcome identifier
+3. `log.warn` for every expected failure path
+4. `log.error` in catch for unexpected failures — exception object as last arg
+
+```java
+public OrderResponse processOrder(OrderRequest request) {
+    log.info("Processing order. customerId={} itemCount={}",
+        request.getCustomerId(), request.getItems().size());
+    try {
+        // ... logic ...
+        log.info("Order processed. orderId={} total={}", order.getId(), total);
+        return response;
+    } catch (ValidationException e) {
+        log.warn("Validation failed. customerId={} reason={}",
+            request.getCustomerId(), e.getMessage());
+        throw e;
+    } catch (Exception e) {
+        log.error("Unexpected error. customerId={} error={}",
+            request.getCustomerId(), e.getMessage(), e);
+        throw new ServiceException("Order processing failed", e);
+    }
+}
+```
+
+Log message rules:
+- `key=value` pairs only — never prose sentences
+- Always include the primary domain ID on every line
+- Never log passwords, tokens, PII, or full request bodies
+
+### MDC Trace Context
+Set at request entry point (filter or @Aspect):
+```java
+MDC.put("correlationId", request.getHeader("X-Correlation-Id") != null
+    ? request.getHeader("X-Correlation-Id") : UUID.randomUUID().toString());
+MDC.put("service", "your-service-name");
+// Always clear in finally: MDC.clear()
+```
+
+### @Timed and @Counted — Required on Every Public Service Method
+```java
+@Timed(
+    value = "[domain].[action].duration",
+    description = "...",
+    percentiles = {0.5, 0.95, 0.99},
+    histogram = true
+)
+@Counted(value = "[domain].[action].count", description = "...")
+public OrderResponse processOrder(OrderRequest request) { ... }
+```
+
+Metric naming convention: `[domain].[action].[unit]`
+- `order.process.duration` — latency
+- `order.process.count` — throughput
+- `order.error.count` — error rate (tag: exceptionType)
+- `order.placed.count` — business event counter
+
+Requires `TimedAspect` bean:
+```java
+@Bean public TimedAspect timedAspect(MeterRegistry r) { return new TimedAspect(r); }
+```
+
+### ELK JSON Logging
+All services output structured JSON via `logstash-logback-encoder`.
+MDC fields `correlationId` and `service` included in every log record.
+
+### Grafana Dashboard Contract — Standard Metric Names
+- `[domain].process.duration` — latency (p50/p95/p99)
+- `[domain].process.count` — throughput
+- `[domain].error.count` — error rate
+- `[domain].[business-event].count` — domain KPIs
+
+---
+
+## Feature Flag Rules — Azure App Configuration (enforced on every new feature)
+
+### When a Feature Flag Is Required
+A feature flag is MANDATORY whenever a story introduces:
+- A new API endpoint (any HTTP method)
+- A new Kafka producer or consumer
+- A change to an existing business rule or calculation
+- Any integration with a new external service or DB table
+
+A feature flag is NOT required for:
+- Pure refactoring (no behaviour change visible to callers)
+- Test-only changes
+- Logging, metrics, or observability additions only
+
+### Naming Convention
+```
+feature.[domain].[story-id]-[short-description]
+```
+Examples:
+- `feature.order.proj-123-express-checkout`
+- `feature.payment.proj-456-new-gateway`
+- `feature.notification.proj-789-push-alerts`
+
+### Every Flag Must Be Declared in FeatureFlags.java
+```java
+// FeatureFlags.java — central registry, one constant per flag
+public static final String ORDER_EXPRESS_CHECKOUT =
+    "feature.order.proj-123-express-checkout";
+```
+Never use a raw string literal for a flag key in production code.
+
+### Default State: ALWAYS Disabled
+Every new flag must default to `false` (disabled) in:
+1. `application.yml` local dev fallback: `feature.[domain].[key]: false`
+2. Azure App Configuration (Terraform/Bicep): `enabled = false`
+
+### Guard Pattern: New Code Is Never Reachable Without Explicit Enable
+```java
+// ✅ Correct — guard at top of method, before any new logic
+if (!featureFlagService.isEnabled(FeatureFlags.ORDER_EXPRESS_CHECKOUT)) {
+    log.warn("Feature disabled — returning existing behaviour. flag={}",
+        FeatureFlags.ORDER_EXPRESS_CHECKOUT);
+    return existingBehaviour();      // existing path, unchanged
+}
+// new implementation below here only
+```
+
+### Kill-Switch Behaviour Contract
+When flag is disabled at runtime:
+- Service methods: return existing code path (no new behaviour)
+- New-only endpoints (no existing path): return `404 Not Found`
+- Kafka listeners: `ack.acknowledge()` + discard (never dead-letter for a disabled flag)
+- Log at `WARN`: `"Feature disabled — [behaviour]. flag=[key]"`
+- Increment counter: `meterRegistry.counter("[domain].[feature].flag-disabled").increment()`
+
+### Azure App Configuration Caching
+- Flag evaluation MUST use the local cached value — NOT a live Azure call per request
+- `bootstrap.yml` must have: `refresh.interval: 30s` (minimum)
+- Never call `featureManager.isEnabled()` inside a loop
+- Flag state refreshes across all pods within the refresh interval — no restart needed
+
+### What Cascade Must NEVER Do
+- Never write new feature code that is reachable without a feature flag guard
+- Never hardcode a flag key as a raw string — always use `FeatureFlags.[CONSTANT]`
+- Never default a new flag to `true` — always `false`
+- Never evaluate a feature flag inside a `@Transactional` method or a loop
+- Never create a flag without a kill-switch runbook in the feature flag report
+
+---
+
+## Scalability & Architecture Rules (enforced when writing any new API or service)
+
+### The Core Rule
+Before writing any new class, controller, or service method for a new feature,
+Cascade MUST check whether an ADR exists for this story:
+```bash
+ls docs/adr/ADR-[STORY-ID]-*.md
+```
+If no ADR exists, STOP and run `/architecture-review` before writing a single line.
+
+---
+
+### Reactive vs Blocking — When to Use Each
+
+**Use Spring WebFlux (Mono/Flux) when:**
+- The service makes 2+ downstream calls that can run in parallel
+- Expected concurrency > 500 simultaneous connections
+- The service is primarily I/O bound (waiting on DB, APIs, Kafka)
+- Streaming responses are required (SSE, chunked)
+
+**Use Spring MVC (blocking) when:**
+- The team has limited reactive experience AND throughput is < 500 req/s
+- The service is primarily compute-bound (PDF generation, complex calculations)
+- All downstream calls are synchronous and cannot be parallelised
+- The ADR explicitly chose MVC after evaluating both options
+
+**NEVER mix reactive and blocking on the same thread:**
+```java
+// ❌ DEADLY — blocks the reactive event loop thread
+public Mono<Order> getOrder(String id) {
+    Order order = orderRepository.findById(id).get();  // blocking JPA on reactive thread
+    return Mono.just(order);
+}
+
+// ✅ Correct — use R2DBC for reactive DB access
+public Mono<Order> getOrder(String id) {
+    return reactiveOrderRepository.findById(id);  // R2DBC — non-blocking
+}
+
+// ✅ Correct — if JPA is required, wrap in boundedElastic scheduler
+public Mono<Order> getOrder(String id) {
+    return Mono.fromCallable(() -> orderRepository.findById(id).orElseThrow())
+        .subscribeOn(Schedulers.boundedElastic());
+}
+```
+
+---
+
+### Communication Pattern Rules
+
+**REST (FeignClient / RestTemplate / WebClient):**
+- FeignClient: always add `@CircuitBreaker` + `@Retry` (max 3, exponential backoff)
+- RestTemplate: deprecated for new code — use WebClient or FeignClient
+- WebClient: use for reactive HTTP calls — never block with `.block()` on the main thread
+- All HTTP clients: set explicit `connectTimeout` (2s) and `readTimeout` (5s)
+
+**gRPC — use for internal service-to-service calls when:**
+- Throughput > 1,000 req/s between services
+- Binary payload efficiency matters
+- Strict schema contracts between services are required
+- Never expose gRPC directly to external clients — use API Gateway
+
+**GraphQL — use when:**
+- Multiple client types (mobile, web, partner) need different data shapes
+- Over-fetching is a known problem
+- ALWAYS implement DataLoader for N+1 batch loading
+- ALWAYS set query depth limit and complexity limit:
+  ```java
+  .instrumentation(new MaxQueryDepthInstrumentation(10))
+  .instrumentation(new MaxQueryComplexityInstrumentation(200))
+  ```
+
+**Kafka — use when:**
+- The caller does not need a synchronous response
+- Fan-out to multiple consumers is required
+- Buffering burst traffic is required
+- ALWAYS produce with idempotent producer (`enable.idempotence=true`)
+- ALWAYS have a Dead Letter Topic (DLT) for consumer failure handling
+- ALWAYS use manual acknowledgement (`AckMode.MANUAL_IMMEDIATE`)
+
+---
+
+### Fault Tolerance Rules (all new integrations)
+
+Every new outbound integration MUST have ALL of the following:
+
+| Layer | Requirement | Implementation |
+|-------|-------------|----------------|
+| Circuit Breaker | Opens after 50% failure rate over 10 calls | `@CircuitBreaker(name=..., fallbackMethod=...)` |
+| Retry | Max 3 attempts with exponential backoff | `@Retry(name=..., fallbackMethod=...)` |
+| Timeout | connect 2s, read 5s | FeignClient config or WebClient timeout |
+| Fallback | Returns safe default, never null | Same-signature method with Throwable param |
+| Bulkhead | Isolate thread pool per downstream | `@Bulkhead(name=..., type=THREADPOOL)` |
+| Observability | @Timed + CB state change logged | Auto via Micrometer + CB event listener |
+
+**Circuit Breaker event logging (add to service config):**
+```java
+circuitBreakerRegistry.circuitBreaker("[name]")
+    .getEventPublisher()
+    .onStateTransition(e -> log.warn(
+        "Circuit breaker state change. name={} from={} to={}",
+        e.getCircuitBreakerName(),
+        e.getStateTransition().getFromState(),
+        e.getStateTransition().getToState()));
+```
+
+---
+
+### Scalability Design Rules
+
+**Thread pool sizing — never use defaults blindly:**
+- Tomcat (MVC): default 200 threads — at 200ms avg response time → 1,000 req/s max
+- Netty (WebFlux): 2× CPU cores event threads → handles thousands of concurrent connections
+- Kafka consumers: one thread per partition — size consumer group accordingly
+- Resilience4j Bulkhead: size per downstream, not per service
+
+**Memory pressure rules:**
+- Never load unbounded collections into memory — always paginate (page size ≤ 100)
+- Never hold DB connections during external API calls
+- Use `Flux.fromIterable()` + `flatMap(concurrency)` for parallel processing of lists:
+  ```java
+  // Process up to 10 items concurrently, not all at once
+  Flux.fromIterable(orderIds)
+      .flatMap(id -> pricingClient.getPrice(id), 10)  // concurrency = 10
+      .collectList()
+  ```
+
+**Caching rules:**
+- Cache reads that are stable for > 1 minute: `@Cacheable(value="prices", key="#productId")`
+- Always set TTL on cache entries — no infinite caches
+- Cache stampede: use `@CachePut` on writes, not just `@Cacheable` on reads
+- For reactive caching: `Mono.fromCallable(...).cache(Duration.ofMinutes(5))`
+
+---
+
+### ADR Compliance
+- Never implement a communication pattern not documented in the ADR
+- If requirements change mid-implementation, update the ADR before changing the code
+- ADR constraints from Step 6 of `/architecture-review` are hard rules, not suggestions
+
+---
+
+## Development Workflow (9 steps — complete)
+Always follow this order for every story that introduces new code:
+1. `/story-intake`         — validate story, detect gaps, PO sign-off ← **ALWAYS FIRST**
+2. `/architecture-review`  — scale profile, tech selection, confirm, write ADR ← **BEFORE ANY CODE**
+3. `/plan-story`           — decompose from intake + ADR, branch, feature flag decision
+4. `/feature-flag`         — register Azure flag, guard, kill-switch *(if new behaviour)*
+5. `/review-story`         — coverage baseline, flag audit, ADR constraint check
+6. `/develop-story`        — Spock first, implement per ADR constraints, retry scaffold
+7. `/code-quality`         — smells, logging, @Timed, flag guards, ADR compliance check
+8. `/nfr-check` → `/nfr-report` — performance risk vs ADR scale profile
+9. `/deploy-story`         — build, compose up, smoke test, PR
+
+**Absolute rules:**
+- `/story-intake` must be ✅ READY before `/architecture-review` runs
+- `/architecture-review` must have a confirmed ADR before `/plan-story` runs
+- Never implement a communication pattern not in the ADR
+- Never write implementation code before the Spock spec exists
+- Never skip `/feature-flag` for new observable behaviour
+- Never skip `/code-quality` before `/nfr-check`
+
+---
+
+## NFR Rules — Performance & Reliability (enforced on every code change)
+
+### Loop Safety
+- NEVER introduce a FeignClient call, RestTemplate call, or repository query inside a `for`,
+  `forEach`, `.stream().map()`, or `while` loop without explicit approval.
+- If iterating over a collection to fetch related data, ALWAYS use a batch/bulk method instead:
+  `findAllById(ids)` not `findById(id)` inside a loop.
+- Any loop over a collection from a repository or API MUST have a bounded size (pagination or
+  a `LIMIT` clause). `findAll()` returning `List<T>` with no `Pageable` parameter is forbidden
+  in service-layer code.
+
+### API Call Rules
+- Every new outbound call (FeignClient, RestTemplate, WebClient) MUST have:
+  - `@CircuitBreaker(name="...", fallbackMethod="...")` from Resilience4j
+  - A configured `connectTimeout` and `readTimeout`
+  - A fallback method that returns a safe default (not null, not throw)
+- Outbound API calls MUST NOT be placed inside a `@Transactional` method.
+  Extract the call to before or after the transaction boundary.
+- Outbound API calls MUST NOT be placed inside a loop (see Loop Safety above).
+
+### Call Depth — Service → Resource Chain
+- Maximum allowed chain: Controller → Service → Repository (3 hops).
+- If a service calls another service which calls a repository, that's acceptable at depth 2.
+- A loop → service → repository chain is an N+1 problem — ALWAYS flag and fix before committing.
+- A loop → service → API call is CRITICAL — must be batched before committing.
+
+### Transaction Boundaries
+- `@Transactional` methods must contain ONLY database operations.
+- No HTTP calls, no Kafka producer calls, no `Thread.sleep` inside `@Transactional`.
+- Read-only methods must use `@Transactional(readOnly = true)`.
+
+### NFR Workflow Integration
+- Before calling `/deploy-story`, ALWAYS run `/nfr-check` and then `/nfr-report`.
+- The updated development order is:
+  1. `/plan-story`
+  2. `/review-story`
+  3. `/develop-story`
+  4. `/nfr-check` → `/nfr-report`
+  5. `/deploy-story` (only if NFR report shows 0 blockers)
+
+---
+
+## What Cascade Should Never Do
+- Never implement a communication pattern not documented in the ADR
+- Never write new feature code without a confirmed /architecture-review ADR
+- Never block a reactive thread with a blocking JPA call — use R2DBC or boundedElastic
+- Never use RestTemplate for new code — use WebClient or FeignClient
+- Never expose gRPC endpoints directly to external clients — use API Gateway
+- Never use GraphQL without DataLoader batching and query complexity limits
+- Never new feature code reachable without a feature flag guard
+- Never hardcode a flag key as a raw string — always use FeatureFlags.[CONSTANT]
+- Never default a new flag to true — always false
+- Never evaluate a feature flag inside a loop or @Transactional method
+- Never write field-injected `@Autowired` — always constructor injection
+- Never use `System.out.println` — always `@Slf4j`
+- Never write Mockito in a Spock spec — use Spock `Mock()`
+- Never skip the Spock spec and write implementation first
+- Never write a method longer than 20 lines — extract named sub-methods
+- Never use a magic number or magic string in logic — extract to a named constant or enum
+- Never nest conditionals more than 2 levels — use guard clauses
+- Never swallow an exception silently — always log + rethrow
+- Never write a public service method without `@Timed`, entry log, and exit log
+- Never log PII, passwords, tokens, or full request bodies
+- Never commit if JaCoCo threshold is failing
+- Never place a FeignClient or RestTemplate call inside a loop — always batch
+- Never place an API call inside a @Transactional method
+- Never return an unbounded List<T> from a repository without Pageable
+- Never skip /code-quality before /nfr-check
+- Never skip /nfr-check before /deploy-story
+- Never hardcode credentials or URLs — use `application.yml` properties or env vars

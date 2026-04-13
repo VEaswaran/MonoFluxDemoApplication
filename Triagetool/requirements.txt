@@ -1,0 +1,6 @@
+botbuilder-core==4.15.0
+botbuilder-schema==4.15.0
+botbuilder-integration-aiohttp==4.15.0
+aiohttp==3.9.3
+asyncio==3.4.3
+python-dotenv==1.0.1
